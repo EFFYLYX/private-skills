@@ -9,6 +9,7 @@
 #   status             Show git status for each git-backed skill
 #   push [name]        Commit & push one or all dirty skills
 #   pull [name]        Pull latest for one or all skills
+#   install [name]     Clone skill repos from your GitHub account that aren't present locally
 #   publish <name>     Init git + create private GitHub repo for a non-git skill
 
 set -euo pipefail
@@ -185,6 +186,69 @@ cmd_pull() {
   echo "Done. All skills up to date."
 }
 
+cmd_install() {
+  # Get current GitHub username
+  local gh_user
+  gh_user="$(gh api user --jq .login 2>/dev/null)"
+  if [ -z "$gh_user" ]; then
+    echo "Error: cannot determine GitHub username. Run 'gh auth login' first." >&2
+    exit 1
+  fi
+
+  if [ -n "$SKILL_NAME" ]; then
+    # Install a single skill by name
+    local dir="$SKILLS_DIR/$SKILL_NAME"
+    if [ -d "$dir/.git" ]; then
+      echo "Skip: $SKILL_NAME (already installed)"
+      return
+    fi
+    # Check if repo exists and has SKILL.md
+    if ! gh api "repos/$gh_user/$SKILL_NAME/contents/SKILL.md" --jq .name &>/dev/null; then
+      echo "Error: $gh_user/$SKILL_NAME does not exist or has no SKILL.md." >&2
+      exit 1
+    fi
+    echo "Installing: $SKILL_NAME ..."
+    gh repo clone "$gh_user/$SKILL_NAME" "$dir" 2>&1 | sed 's/^/  /'
+    echo "Done."
+    return
+  fi
+
+  # Install all: list user's repos, check each for SKILL.md
+  echo "Scanning $gh_user's GitHub repos for skills..."
+  local repos
+  repos="$(gh repo list "$gh_user" --limit 100 --json name --jq '.[].name')"
+
+  local installed=0
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    local dir="$SKILLS_DIR/$repo"
+
+    # Skip if already present (as git repo or directory)
+    if [ -d "$dir" ]; then
+      if [ -d "$dir/.git" ]; then
+        echo "Skip: $repo (already installed)"
+      fi
+      continue
+    fi
+
+    # Check if repo has SKILL.md
+    if ! gh api "repos/$gh_user/$repo/contents/SKILL.md" --jq .name &>/dev/null; then
+      continue
+    fi
+
+    echo "Installing: $repo ..."
+    gh repo clone "$gh_user/$repo" "$dir" 2>&1 | sed 's/^/  /'
+    installed=$((installed + 1))
+  done <<< "$repos"
+
+  if [ "$installed" -eq 0 ]; then
+    echo "All skill repos are already installed."
+  else
+    echo ""
+    echo "Done. Installed $installed skill(s)."
+  fi
+}
+
 cmd_publish() {
   if [ -z "$SKILL_NAME" ]; then
     echo "Error: publish requires a skill name." >&2
@@ -206,13 +270,19 @@ cmd_publish() {
   fi
 
   echo "Publishing: $SKILL_NAME ..."
+  local gh_user
+  gh_user="$(gh api user --jq .login 2>/dev/null)"
+  if [ -z "$gh_user" ]; then
+    echo "Error: cannot determine GitHub username. Run 'gh auth login' first." >&2
+    exit 1
+  fi
   git -C "$dir" init 2>&1 | sed 's/^/  /'
   git -C "$dir" add -A
   git -C "$dir" commit -m "Initial commit for $SKILL_NAME" 2>&1 | sed 's/^/  /'
-  gh repo create "EFFYLYX/$SKILL_NAME" --private --source="$dir" --push 2>&1 | sed 's/^/  /'
+  gh repo create "$gh_user/$SKILL_NAME" --private --source="$dir" --push 2>&1 | sed 's/^/  /'
 
   echo ""
-  echo "Done. $SKILL_NAME published to github.com/EFFYLYX/$SKILL_NAME (private)."
+  echo "Done. $SKILL_NAME published to github.com/$gh_user/$SKILL_NAME (private)."
 }
 
 case "$CMD" in
@@ -220,10 +290,11 @@ case "$CMD" in
   status)  cmd_status ;;
   push)    cmd_push ;;
   pull)    cmd_pull ;;
+  install) cmd_install ;;
   publish) cmd_publish ;;
   *)
     echo "Unknown command: $CMD" >&2
-    echo "Usage: private-skills.sh <list|status|push|pull|publish> [skill_name]" >&2
+    echo "Usage: private-skills.sh <list|status|push|pull|install|publish> [skill_name]" >&2
     exit 1
     ;;
 esac
